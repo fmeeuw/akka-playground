@@ -26,7 +26,7 @@ object ActorRefBackpressureFlowStage {
   * will be sent to the destination actor.
   * When the stream is completed with failure a `StreamFailed(ex)` message will be send to the destination actor.
   */
-class ActorRefBackpressureFlowStage[In, Out](mkActor: () => ActorRef) extends GraphStage[FlowShape[In, Out]] {
+class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) extends GraphStage[FlowShape[In, Out]] {
 
   import ActorRefBackpressureFlowStage._
 
@@ -35,57 +35,49 @@ class ActorRefBackpressureFlowStage[In, Out](mkActor: () => ActorRef) extends Gr
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
 
-    //Used as sender, when sending messages from this graphStage.
-    implicit var thisStageActor: ActorRef = ActorRef.noSender
-    var flowActor: ActorRef = ActorRef.noSender
+    private lazy val self = getStageActor {
+      case (_, StreamAck) =>
+        if(firstPullReceived) {
+          if (!isClosed(in) && !hasBeenPulled(in)) {
+            pull(in)
+          }
+        } else {
+          pullOnFirstPullReceived = true
+        }
+
+      case (_, StreamElementOut(elemOut)) =>
+        val elem = elemOut.asInstanceOf[Out]
+        emit(out, elem)
+
+      case (_, Terminated(targetRef)) =>
+        failStage(new WatchedActorTerminatedException("ActorRefBackpressureFlowStage", targetRef))
+
+      case (actorRef, unexpected) =>
+        failStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
+    }
     var firstPullReceived: Boolean = false
     var pullOnFirstPullReceived: Boolean = false
 
     override def preStart(): Unit = {
-
-      def messageHandler(receive: (ActorRef, Any)): Unit = {
-        receive match {
-          case (_, StreamAck) =>
-            if(firstPullReceived) {
-              if (!isClosed(in) && !hasBeenPulled(in)) {
-                pull(in)
-              }
-            } else {
-              pullOnFirstPullReceived = true
-            }
-
-          case (_, StreamElementOut(elemOut)) =>
-            val elem = elemOut.asInstanceOf[Out]
-            emit(out, elem)
-
-          case (_, Terminated(targetRef)) =>
-            failStage(new WatchedActorTerminatedException("ActorRefBackpressureFlowStage", targetRef))
-
-          case (actorRef, unexpected) =>
-            failStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
-        }
-      }
-
-      flowActor = mkActor()
-      thisStageActor = getStageActor(messageHandler).ref
-      stageActor.watch(flowActor)
-      flowActor ! StreamInit
+      //initialize stage actor and watch flow actor.
+      self.watch(flowActor)
+      tellFlowActor(StreamInit)
     }
 
     setHandler(in, new InHandler {
 
       override def onPush(): Unit = {
         val elementIn = grab(in)
-        flowActor ! StreamElementIn(elementIn)
+        tellFlowActor(StreamElementIn(elementIn))
       }
 
       override def onUpstreamFailure(ex: Throwable): Unit = {
-        flowActor ! StreamFailed(ex)
+        tellFlowActor(StreamFailed(ex))
         super.onUpstreamFailure(ex)
       }
 
       override def onUpstreamFinish(): Unit = {
-        flowActor ! StreamCompleted
+        tellFlowActor(StreamCompleted)
         super.onUpstreamFinish()
       }
     })
@@ -104,10 +96,14 @@ class ActorRefBackpressureFlowStage[In, Out](mkActor: () => ActorRef) extends Gr
       }
 
       override def onDownstreamFinish(): Unit = {
-        flowActor ! StreamCompleted
+        tellFlowActor(StreamCompleted)
         super.onDownstreamFinish()
       }
     })
+
+    private def tellFlowActor(message: Any): Unit = {
+      flowActor.tell(message, self.ref)
+    }
 
   }
 

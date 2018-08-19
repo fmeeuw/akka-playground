@@ -202,7 +202,7 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
     def withFixture(f: (TestProbe, TestPublisher.Probe[Int], TestSubscriber.Probe[Int]) => Unit): Unit = {
       val actorProbe = TestProbe()
       val (sourceProbe, sinkProbe) = TestSource.probe[Int]
-        .via(new ActorRefBackpressureFlowStage[Int, Int](() => actorProbe.ref))
+        .via(new ActorRefBackpressureFlowStage[Int, Int](actorProbe.ref))
         .toMat(TestSink.probe[Int])(Keep.both)
         .run()
       f(actorProbe, sourceProbe, sinkProbe)
