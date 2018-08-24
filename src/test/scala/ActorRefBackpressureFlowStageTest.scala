@@ -1,4 +1,3 @@
-
 import ActorRefBackpressureFlowStage._
 import akka.actor.{ActorSystem, PoisonPill}
 import akka.stream.scaladsl.Keep
@@ -16,15 +15,12 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
   with Matchers
   with Eventually {
 
-
   val settings: ActorMaterializerSettings = ActorMaterializerSettings(system)
     .withInputBuffer(initialSize = 1, maxSize = 1)
     .withFuzzing(true)
 
   implicit val materializer: Materializer = ActorMaterializer(settings)
   val expectTimeout: FiniteDuration = 5.seconds
-
-
 
   "The ActorFlow" should {
 
@@ -34,7 +30,6 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
         //Input buffer requests 1 before source is actually pulled, therefore sending first element already to clear requests.
         sourceProbe.sendNext(1)
         sourceProbe.pending shouldEqual 0
-
 
         actorProbe.expectMsg(StreamInit)
         intercept[AssertionError] {
@@ -73,7 +68,7 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
       }
     }
 
-    "pull after a StreamElementIn message is acknowledged." in {
+    "pull after a StreamElementIn message is acknowledged by a StreamAck message." in {
       withFixture { (actorProbe, sourceProbe, sinkProbe) =>
 
         //Input buffer requests 1 before source is actually pulled, therefore sending first element already to clear requests.
@@ -99,6 +94,34 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
         sourceProbe.expectRequest() shouldEqual 1
       }
     }
+
+    "pull after a StreamElementIn message is acknowledged by a StreamElementOutWithAck message." in {
+      withFixture { (actorProbe, sourceProbe, sinkProbe) =>
+
+        //Input buffer requests 1 before source is actually pulled, therefore sending first element already to clear requests.
+        sourceProbe.sendNext(1)
+        sourceProbe.pending shouldEqual 0
+
+        //first pull after StreamAck+upstream pull
+        sinkProbe.request(1)
+        actorProbe.expectMsg(StreamInit)
+        actorProbe.lastSender ! StreamAck
+
+        //Send next element already to clear pending requests.
+        sourceProbe.sendNext(2)
+        sourceProbe.pending shouldEqual 0
+
+
+        actorProbe.expectMsg(expectTimeout, StreamElementIn(1))
+        intercept[AssertionError] {
+          sourceProbe.expectRequest()
+        }
+
+        actorProbe.lastSender ! StreamElementOutWithAck(1)
+        sourceProbe.expectRequest() shouldEqual 1
+      }
+    }
+
 
     "send a StreamFailed message to the actor, when upstream fails." in {
       withFixture { (actorProbe, sourceProbe, sinkProbe) =>
@@ -143,17 +166,18 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
       }
     }
 
-    "work correctly when the flow actor replies on each StreamElementIn element with a StreamElementOut, regardless whether the StreamAck is before or after the StreamElementOut. (linear)" in {
+    "work correctly when the flow actor replies on each StreamElementIn element with a StreamElementOut, regardless whether the StreamAck is before or after the StreamElementOut or a StreamElementOutWithAck is send.(linear)" in {
       withFixture { (actorProbe, sourceProbe, sinkProbe) =>
         actorProbe.expectMsg(StreamInit)
         actorProbe.lastSender ! StreamAck
 
         receiveAckAndEmit(actorProbe, sourceProbe, sinkProbe)(1, 101)
         receiveEmitAndAck(actorProbe, sourceProbe, sinkProbe)(2, 102)
-        receiveAckAndEmit(actorProbe, sourceProbe, sinkProbe)(3, 103)
+        receiveCombinedEmitAndAck(actorProbe, sourceProbe, sinkProbe)(3, 103)
+
         receiveEmitAndAck(actorProbe, sourceProbe, sinkProbe)(4, 104)
-        receiveAckAndEmit(actorProbe, sourceProbe, sinkProbe)(5, 105)
-        receiveEmitAndAck(actorProbe, sourceProbe, sinkProbe)(6, 106)
+        receiveCombinedEmitAndAck(actorProbe, sourceProbe, sinkProbe)(5, 105)
+        receiveAckAndEmit(actorProbe, sourceProbe, sinkProbe)(6, 106)
       }
     }
 
@@ -164,53 +188,65 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
 
         emit(actorProbe, sinkProbe)(101)
         emit(actorProbe, sinkProbe)(102)
+        receiveAckAndEmit(actorProbe, sourceProbe, sinkProbe)(1, 103)
         emit(actorProbe, sinkProbe)(103)
-        receiveAckAndEmit(actorProbe, sourceProbe, sinkProbe)(1, 104)
         emit(actorProbe, sinkProbe)(105)
-        emit(actorProbe, sinkProbe)(106)
+        receiveCombinedEmitAndAck(actorProbe, sourceProbe, sinkProbe)(2, 106)
         emit(actorProbe, sinkProbe)(107)
-        receiveEmitAndAck(actorProbe, sourceProbe, sinkProbe)(1, 108)
+        emit(actorProbe, sinkProbe)(108)
+        receiveEmitAndAck(actorProbe, sourceProbe, sinkProbe)(3, 108)
       }
     }
+  }
 
-    def receiveAckAndEmit(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int, elementOut: Int): Unit = {
-      receiveAndAck(actorProbe, sourceProbe, sinkProbe)(elementIn)
-      emit(actorProbe, sinkProbe)(elementOut)
-    }
+  def receiveCombinedEmitAndAck(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int, elementOut: Int): Unit = {
+    receive(actorProbe, sourceProbe, sinkProbe)(elementIn)
+    combinedEmitAndAck(actorProbe, sinkProbe)(elementOut)
+  }
 
-    def receiveEmitAndAck(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int, elementOut: Int): Unit = {
-      sinkProbe.request(1)
-      sourceProbe.sendNext(elementIn)
-      actorProbe.expectMsg(expectTimeout, StreamElementIn(elementIn))
-      emit(actorProbe, sinkProbe)(elementOut)
-      actorProbe.lastSender ! StreamAck
-    }
+  def receiveAckAndEmit(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int, elementOut: Int): Unit = {
+    receiveAndAck(actorProbe, sourceProbe, sinkProbe)(elementIn)
+    emit(actorProbe, sinkProbe)(elementOut)
+  }
 
-    def receiveAndAck(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int): Unit = {
-      sinkProbe.request(1)
-      sourceProbe.sendNext(elementIn)
-      actorProbe.expectMsg(expectTimeout, StreamElementIn(elementIn))
-      actorProbe.lastSender ! StreamAck
-    }
+  def receiveEmitAndAck(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int, elementOut: Int): Unit = {
+    sinkProbe.request(1)
+    sourceProbe.sendNext(elementIn)
+    actorProbe.expectMsg(expectTimeout, StreamElementIn(elementIn))
+    emit(actorProbe, sinkProbe)(elementOut)
+    actorProbe.lastSender ! StreamAck
+  }
 
-    def emit(actorProbe: TestProbe, sinkProbe: TestSubscriber.Probe[Int])(elementOut: Int): Unit = {
-      sinkProbe.request(1)
-      actorProbe.lastSender ! StreamElementOut(elementOut)
-      sinkProbe.expectNext(expectTimeout) shouldEqual elementOut
-    }
+  def receiveAndAck(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int): Unit = {
+    receive(actorProbe, sourceProbe, sinkProbe)(elementIn)
+    actorProbe.lastSender ! StreamAck
+  }
 
-    def withFixture(f: (TestProbe, TestPublisher.Probe[Int], TestSubscriber.Probe[Int]) => Unit): Unit = {
-      val actorProbe = TestProbe()
-      val (sourceProbe, sinkProbe) = TestSource.probe[Int]
-        .via(new ActorRefBackpressureFlowStage[Int, Int](actorProbe.ref))
-        .toMat(TestSink.probe[Int])(Keep.both)
-        .run()
-      f(actorProbe, sourceProbe, sinkProbe)
-    }
+  def receive(actorProbe: TestProbe, sourceProbe: TestPublisher.Probe[Int], sinkProbe: TestSubscriber.Probe[Int])(elementIn: Int): Unit = {
+    sinkProbe.request(1)
+    sourceProbe.sendNext(elementIn)
+    actorProbe.expectMsg(expectTimeout, StreamElementIn(elementIn))
+  }
 
+  def combinedEmitAndAck(actorProbe: TestProbe, sinkProbe: TestSubscriber.Probe[Int])(elementOut: Int): Unit = {
+    sinkProbe.request(1)
+    actorProbe.lastSender ! StreamElementOutWithAck(elementOut)
+    sinkProbe.expectNext(expectTimeout) shouldEqual elementOut
+  }
+
+  def emit(actorProbe: TestProbe, sinkProbe: TestSubscriber.Probe[Int])(elementOut: Int): Unit = {
+    sinkProbe.request(1)
+    actorProbe.lastSender ! StreamElementOut(elementOut)
+    sinkProbe.expectNext(expectTimeout) shouldEqual elementOut
+  }
+
+  def withFixture(f: (TestProbe, TestPublisher.Probe[Int], TestSubscriber.Probe[Int]) => Unit): Unit = {
+    val actorProbe = TestProbe()
+    val (sourceProbe, sinkProbe) = TestSource.probe[Int]
+      .via(new ActorRefBackpressureFlowStage[Int, Int](actorProbe.ref))
+      .toMat(TestSink.probe[Int])(Keep.both)
+      .run()
+    f(actorProbe, sourceProbe, sinkProbe)
   }
 
 }
-
-
-
