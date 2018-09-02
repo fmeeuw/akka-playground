@@ -122,7 +122,6 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
       }
     }
 
-
     "send a StreamFailed message to the actor, when upstream fails." in {
       withFixture { (actorProbe, sourceProbe, sinkProbe) =>
         actorProbe.expectMsg(StreamInit)
@@ -135,13 +134,79 @@ class ActorRefBackpressureFlowStageTest extends TestKit(ActorSystem("ActorFlowTe
       }
     }
 
-    "send a StreamCompleted message to the flow actor, when upstream completes." in {
+    "wait for the next acknowledgement when upstream completes, before sending a StreamCompleted message to the flow actor and close the stage." in {
+      //complete after ack
       withFixture { (actorProbe, sourceProbe, sinkProbe) =>
         actorProbe.expectMsg(StreamInit)
         actorProbe.lastSender ! StreamAck
 
         sourceProbe.sendComplete()
         actorProbe.expectMsg(StreamCompleted)
+
+        sinkProbe.expectSubscriptionAndComplete()
+      }
+
+      //complete before streamInit acked.
+      withFixture { (actorProbe, sourceProbe, sinkProbe) =>
+        actorProbe.expectMsg(StreamInit)
+
+        sourceProbe.sendComplete()
+
+        //should not complete yet, still waiting for ack
+        actorProbe.expectNoMessage()
+        intercept[AssertionError] {
+          sinkProbe.expectSubscriptionAndComplete()
+        }
+
+        actorProbe.lastSender ! StreamAck
+        actorProbe.expectMsg(StreamCompleted)
+        sinkProbe.expectComplete()
+      }
+
+      //complete before streamElementIn acked.
+      withFixture { (actorProbe, sourceProbe, sinkProbe) =>
+        actorProbe.expectMsg(StreamInit)
+        actorProbe.lastSender ! StreamAck
+
+        sinkProbe.request(1)
+        sourceProbe.sendNext(3)
+        sourceProbe.sendComplete()
+
+        actorProbe.expectMsg(StreamElementIn(3))
+
+        //should not complete yet, still waiting for ack
+        actorProbe.expectNoMessage()
+        intercept[AssertionError] {
+          sinkProbe.expectComplete()
+        }
+
+        actorProbe.lastSender ! StreamAck
+
+        actorProbe.expectMsg(StreamCompleted)
+        sinkProbe.expectComplete()
+      }
+
+      //complete before streamElemenin acked with StreamElementOutWithAck.
+      withFixture { (actorProbe, sourceProbe, sinkProbe) =>
+        actorProbe.expectMsg(StreamInit)
+        actorProbe.lastSender ! StreamAck
+
+        sinkProbe.request(1)
+        sourceProbe.sendNext(3)
+        sourceProbe.sendComplete()
+        actorProbe.expectMsg(StreamElementIn(3))
+
+        //should not complete yet, still waiting for ack
+        actorProbe.expectNoMessage()
+        intercept[AssertionError] {
+          sinkProbe.expectComplete()
+        }
+
+        actorProbe.lastSender ! StreamElementOutWithAck(4)
+
+        actorProbe.expectMsg(StreamCompleted)
+        sinkProbe.expectNext(4)
+        sinkProbe.expectComplete()
       }
     }
 

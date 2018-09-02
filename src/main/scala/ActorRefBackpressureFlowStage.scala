@@ -40,12 +40,20 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
     def stageActorReceive(messageWithSender: (ActorRef, Any)): Unit = {
       def onAck(): Unit = {
         if(firstPullReceived) {
-          if (!isClosed(in) && !hasBeenPulled(in)) {
-            pull(in)
+          if (!isClosed(in)) {
+            if(!hasBeenPulled(in)) {
+              pull(in)
+            }
+          } else {
+            self.unwatch(flowActor)
+            tellFlowActor(StreamCompleted)
+            this.completeStage() //Complete stage when in is closed, this might happen if onUpstreamFinish is called when still expecting an ack.
           }
         } else {
           pullOnFirstPullReceived = true
         }
+
+        expectingAck = false
       }
 
       def onElementOut(elemOut: Any): Unit = {
@@ -75,11 +83,13 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
     private lazy val self = getStageActor(stageActorReceive)
     var firstPullReceived: Boolean = false
     var pullOnFirstPullReceived: Boolean = false
+    var expectingAck = false
 
     override def preStart(): Unit = {
       //initialize stage actor and watch flow actor.
       self.watch(flowActor)
       tellFlowActor(StreamInit)
+      expectingAck = true
     }
 
     setHandler(in, new InHandler {
@@ -87,16 +97,21 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
       override def onPush(): Unit = {
         val elementIn = grab(in)
         tellFlowActor(StreamElementIn(elementIn))
+        expectingAck = true
       }
 
       override def onUpstreamFailure(ex: Throwable): Unit = {
+        self.unwatch(flowActor)
         tellFlowActor(StreamFailed(ex))
         super.onUpstreamFailure(ex)
       }
 
       override def onUpstreamFinish(): Unit = {
-        tellFlowActor(StreamCompleted)
-        super.onUpstreamFinish()
+        if(!expectingAck) {
+          self.unwatch(flowActor)
+          tellFlowActor(StreamCompleted)
+          super.onUpstreamFinish()
+        }
       }
     })
 
@@ -114,6 +129,7 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
       }
 
       override def onDownstreamFinish(): Unit = {
+        self.unwatch(flowActor)
         tellFlowActor(StreamCompleted)
         super.onDownstreamFinish()
       }
