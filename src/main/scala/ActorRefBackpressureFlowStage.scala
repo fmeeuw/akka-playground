@@ -37,23 +37,16 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
 
+    var firstAckReceived: Boolean = false
+    var firstPullReceived: Boolean = false
+    var expectingAck: Boolean = false
+
     def stageActorReceive(messageWithSender: (ActorRef, Any)): Unit = {
       def onAck(): Unit = {
-        if(firstPullReceived) {
-          if (!isClosed(in)) {
-            if(!hasBeenPulled(in)) {
-              pull(in)
-            }
-          } else {
-            self.unwatch(flowActor)
-            tellFlowActor(StreamCompleted)
-            this.completeStage() //Complete stage when in is closed, this might happen if onUpstreamFinish is called when still expecting an ack.
-          }
-        } else {
-          pullOnFirstPullReceived = true
-        }
-
+        firstAckReceived = true
         expectingAck = false
+        pullIfNeeded()
+        completeStageIfNeeded()
       }
 
       def onElementOut(elemOut: Any): Unit = {
@@ -79,11 +72,7 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
           failStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
       }
     }
-
     private lazy val self = getStageActor(stageActorReceive)
-    var firstPullReceived: Boolean = false
-    var pullOnFirstPullReceived: Boolean = false
-    var expectingAck = false
 
     override def preStart(): Unit = {
       //initialize stage actor and watch flow actor.
@@ -108,8 +97,7 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
 
       override def onUpstreamFinish(): Unit = {
         if(!expectingAck) {
-          self.unwatch(flowActor)
-          tellFlowActor(StreamCompleted)
+          unwatchAndSendCompleted()
           super.onUpstreamFinish()
         }
       }
@@ -117,28 +105,38 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
 
     setHandler(out, new OutHandler {
       override def onPull(): Unit = {
-        if(!firstPullReceived) {
-          firstPullReceived = true
-          if(pullOnFirstPullReceived) {
-            if (!isClosed(in) && !hasBeenPulled(in)) {
-              pull(in)
-            }
-          }
-        }
-
+        firstPullReceived = true
+        pullIfNeeded()
       }
 
       override def onDownstreamFinish(): Unit = {
-        self.unwatch(flowActor)
-        tellFlowActor(StreamCompleted)
+        unwatchAndSendCompleted()
         super.onDownstreamFinish()
       }
     })
 
+    private def pullIfNeeded(): Unit = {
+      if(firstAckReceived && firstPullReceived && !hasBeenPulled(in)) {
+        tryPull(in)
+      }
+    }
+
+    private def completeStageIfNeeded(): Unit = {
+      if(isClosed(in)) {
+        self.unwatch(flowActor)
+        tellFlowActor(StreamCompleted)
+        this.completeStage() //Complete stage when in is closed, this might happen if onUpstreamFinish is called when still expecting an ack.
+      }
+    }
+
+    private def unwatchAndSendCompleted(): Unit = {
+      self.unwatch(flowActor)
+      tellFlowActor(StreamCompleted)
+    }
+
     private def tellFlowActor(message: Any): Unit = {
       flowActor.tell(message, self.ref)
     }
-
   }
 
   override def shape: FlowShape[In, Out] = FlowShape(in, out)
