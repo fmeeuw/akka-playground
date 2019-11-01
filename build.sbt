@@ -2,11 +2,12 @@ name := "akka-playground"
 
 version := "0.1"
 
-scalaVersion := "2.12.6"
+scalaVersion := "2.13.0"
 
-libraryDependencies += "com.typesafe.akka" %% "akka-stream"         % "2.5.14"
-libraryDependencies += "com.typesafe.akka" %% "akka-actor"          % "2.5.14"
-libraryDependencies += "com.typesafe.akka" %% "akka-testkit"        % "2.5.14"  % Test
-libraryDependencies += "com.typesafe.akka" %% "akka-stream-testkit" % "2.5.14"  % Test
-libraryDependencies += "org.scalatest"     %% "scalatest"           % "3.0.5"   % Test
+val akkaVersion        = "2.5.26"
 
+libraryDependencies += "com.typesafe.akka" %% "akka-stream"         % akkaVersion
+libraryDependencies += "com.typesafe.akka" %% "akka-actor"          % akkaVersion
+libraryDependencies += "com.typesafe.akka" %% "akka-testkit"        % akkaVersion  % Test
+libraryDependencies += "com.typesafe.akka" %% "akka-stream-testkit" % akkaVersion  % Test
+libraryDependencies += "org.scalatest"     %% "scalatest"           % "3.0.8"      % Test
