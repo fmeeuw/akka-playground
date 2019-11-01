@@ -1,6 +1,7 @@
 import akka.actor.{ActorRef, Terminated}
 import akka.stream._
 import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
+import scala.util.Failure
 
 object ActorRefBackpressureFlowStage {
   case object StreamInit
@@ -13,21 +14,21 @@ object ActorRefBackpressureFlowStage {
 }
 
 /**
-  * Sends the elements of the stream to the given `ActorRef` that sends back back-pressure signal.
-  * First element is always `StreamInit`, then stream is waiting for acknowledgement message
-  * `ackMessage` from the given actor which means that it is ready to process
-  * elements. It also requires `ackMessage` message after each stream element
-  * to make backpressure work. Stream elements are wrapped inside `StreamElementIn(elem)` messages.
-  *
-  * The target actor can emit elements at any time by sending a `StreamElementOut(elem)` message, which will
-  * be emitted downstream when there is demand. There is also a StreamElementOutWithAck(elem), that combines the
-  * StreamElementOut and StreamAck message in one.
-  *
-  * If the target actor terminates the stage will fail with a WatchedActorTerminatedException.
-  * When the stream is completed successfully a `StreamCompleted` message
-  * will be sent to the destination actor.
-  * When the stream is completed with failure a `StreamFailed(ex)` message will be send to the destination actor.
-  */
+ * Sends the elements of the stream to the given `ActorRef` that sends back back-pressure signal.
+ * First element is always `StreamInit`, then stream is waiting for acknowledgement message
+ * `ackMessage` from the given actor which means that it is ready to process
+ * elements. It also requires `ackMessage` message after each stream element
+ * to make backpressure work. Stream elements are wrapped inside `StreamElementIn(elem)` messages.
+ *
+ * The target actor can emit elements at any time by sending a `StreamElementOut(elem)` message, which will
+ * be emitted downstream when there is demand. There is also a StreamElementOutWithAck(elem), that combines the
+ * StreamElementOut and StreamAck message in one.
+ *
+ * If the target actor terminates the stage will fail with a WatchedActorTerminatedException.
+ * When the stream is completed successfully a `StreamCompleted` message
+ * will be sent to the destination actor.
+ * When the stream is completed with failure a `StreamFailed(ex)` message will be send to the destination actor.
+ */
 class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) extends GraphStage[FlowShape[In, Out]] {
 
   import ActorRefBackpressureFlowStage._
@@ -65,11 +66,14 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
           onElementOut(elemOut)
           onAck()
 
+        case (actorRef, Failure(cause)) =>
+          terminateActorAndFailStage(new RuntimeException(s"Exception during processing by actor $actorRef: ${cause.getMessage}", cause))
+
         case (_, Terminated(targetRef)) =>
           failStage(new WatchedActorTerminatedException("ActorRefBackpressureFlowStage", targetRef))
 
         case (actorRef, unexpected) =>
-          failStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
+          terminateActorAndFailStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
       }
     }
     private lazy val self = getStageActor(stageActorReceive)
@@ -105,8 +109,10 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
 
     setHandler(out, new OutHandler {
       override def onPull(): Unit = {
-        firstPullReceived = true
-        pullIfNeeded()
+        if (!firstPullReceived) {
+            firstPullReceived = true
+            pullIfNeeded() //Only do the first pull
+          }
       }
 
       override def onDownstreamFinish(): Unit = {
@@ -123,8 +129,7 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
 
     private def completeStageIfNeeded(): Unit = {
       if(isClosed(in)) {
-        self.unwatch(flowActor)
-        tellFlowActor(StreamCompleted)
+        unwatchAndSendCompleted()
         this.completeStage() //Complete stage when in is closed, this might happen if onUpstreamFinish is called when still expecting an ack.
       }
     }
@@ -136,6 +141,12 @@ class ActorRefBackpressureFlowStage[In, Out](private val flowActor: ActorRef) ex
 
     private def tellFlowActor(message: Any): Unit = {
       flowActor.tell(message, self.ref)
+    }
+
+    private def terminateActorAndFailStage(ex: Throwable): Unit = {
+      self.unwatch(flowActor)
+      tellFlowActor(StreamFailed(ex))
+      failStage(ex)
     }
   }
 

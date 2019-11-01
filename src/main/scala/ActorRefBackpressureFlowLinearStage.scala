@@ -3,6 +3,8 @@ import akka.actor.{ActorRef, Terminated}
 import akka.stream._
 import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
 
+import scala.util.Failure
+
 class ActorRefBackpressureFlowLinearStage[In, Out](private val flowActor: ActorRef) extends GraphStage[FlowShape[In, Out]] {
 
   val in: Inlet[In] = Inlet("ActorFlowLinearIn")
@@ -19,11 +21,14 @@ class ActorRefBackpressureFlowLinearStage[In, Out](private val flowActor: ActorR
           completeStageIfNeeded()
           expectingAck = false
 
+        case (actorRef, Failure(cause)) =>
+          terminateActorAndFailStage(new RuntimeException(s"Exception during processing by actor $actorRef: ${cause.getMessage}", cause))
+
         case (_, Terminated(targetRef)) =>
           failStage(new WatchedActorTerminatedException("ActorRefBackpressureFlowStage", targetRef))
 
         case (actorRef, unexpected) =>
-          failStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
+          terminateActorAndFailStage(new IllegalStateException(s"Unexpected message: `$unexpected` received from actor `$actorRef`."))
       }
     }
 
@@ -84,6 +89,12 @@ class ActorRefBackpressureFlowLinearStage[In, Out](private val flowActor: ActorR
 
     private def tellFlowActor(message: Any): Unit = {
       flowActor.tell(message, self.ref)
+    }
+
+    private def terminateActorAndFailStage(ex: Throwable): Unit = {
+      self.unwatch(flowActor)
+      tellFlowActor(StreamFailed(ex))
+      failStage(ex)
     }
   }
 
